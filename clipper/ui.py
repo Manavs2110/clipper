@@ -78,10 +78,29 @@ def _publish_job(name: str, plat: str) -> None:
         else:
             url = publish.post_facebook(video, e["caption"])
         res = {"state": "published", "url": url, "at": int(__import__("time").time())}
+        _edit(name, lambda m: m["platforms"][plat].__setitem__("publish", res))
+        _archive(name)
+        return
     except Exception as ex:
         traceback.print_exc()
         res = {"state": "failed", "error": str(ex)[:500]}
     _edit(name, lambda m: m["platforms"][plat].__setitem__("publish", res))
+
+
+def _archive(name: str) -> None:
+    """Copy a posted clip to the Google Drive folder once."""
+    if not publish.connections()["gdrive"]["connected"]:
+        return
+    meta = json.loads(meta_path(name).read_text())
+    if meta.get("drive", {}).get("url"):
+        return
+    try:
+        url = publish.save_to_drive(meta_path(name).with_suffix(".mp4"), publish.drive_description(meta))
+        res = {"url": url}
+    except Exception as ex:
+        traceback.print_exc()
+        res = {"error": str(ex)[:300]}
+    _edit(name, lambda m: m.__setitem__("drive", res))
 
 
 def _start_publish(name: str, plat: str) -> bool:
@@ -175,9 +194,39 @@ def auth_youtube_cb():
     return _done(f"Connected ✓ YouTube channel <b>{d['channel']}</b>")
 
 
+@app.get("/auth/gdrive")
+def auth_gdrive():
+    if not publish.connections()["gdrive"]["ready"]:
+        return _done("Add GDRIVE_FOLDER_ID to .env and youtube_client_secret.json first."), 400
+    return redirect(publish.gdrive_login_url())
+
+
+@app.get("/auth/gdrive/callback")
+def auth_gdrive_cb():
+    if request.args.get("error"):
+        return _done(f"Google Drive login cancelled: {request.args['error']}")
+    try:
+        d = publish.gdrive_callback(request.args["code"], request.args.get("state", ""))
+    except Exception as e:
+        traceback.print_exc()
+        return _done(f"Couldn't connect Google Drive: {e}"), 400
+    threading.Thread(target=_backfill_drive, daemon=True).start()
+    return _done(f"Connected ✓ Google Drive <b>{d['account']}</b> → folder <b>{d['folder']}</b>. "
+                 "Already-posted clips are being copied there now.")
+
+
+def _backfill_drive() -> None:
+    for j in cfg().review_dir.glob("*.json"):
+        m = json.loads(j.read_text())
+        posted = any(v.get("publish", {}).get("state") == "published" and v.get("verdict") != "block"
+                     for v in m.get("platforms", {}).values())
+        if posted:
+            _archive(j.stem)
+
+
 @app.post("/api/disconnect/<svc>")
 def disconnect(svc):
-    f = {"meta": "meta.json", "youtube": "youtube.json"}.get(svc)
+    f = {"meta": "meta.json", "youtube": "youtube.json", "gdrive": "gdrive.json"}.get(svc)
     if not f:
         abort(400)
     (publish.TOKENS / f).unlink(missing_ok=True)
@@ -279,7 +328,9 @@ function drawConn(){const m=conn.meta,y=conn.youtube;
   :y.ready?`YouTube <a class="btn primary" href="/auth/youtube">Connect YouTube</a>`:`YouTube: add <code>youtube_client_secret.json</code> (SETUP.md step 2)`;
  const mt=m.connected?`Facebook: <b>${esc(m.page)}</b> · Instagram: <b>${m.instagram?"@"+esc(m.instagram):"not linked"}</b>${m.r2?"":" · R2 missing"} <button data-dc="meta">Disconnect</button>`
   :m.ready?`Instagram + Facebook <a class="btn primary" href="/auth/meta">Connect Instagram &amp; Facebook</a>`:`Meta: add META_APP_ID/SECRET to .env`;
- $("#conn").innerHTML=`<div class="c"><span class="dot ${y.connected?"on":""}"></span>${yt}</div><div class="c"><span class="dot ${m.connected?"on":""}"></span>${mt}</div>`}
+ const g=conn.gdrive, gd=g.connected?`Drive: <b>${esc(g.folder)}</b> (${esc(g.account)}) <button data-dc="gdrive">Disconnect</button>`
+  :g.ready?`Google Drive <a class="btn primary" href="/auth/gdrive">Connect Google Drive</a>`:`Drive: add GDRIVE_FOLDER_ID to .env`;
+ $("#conn").innerHTML=`<div class="c"><span class="dot ${y.connected?"on":""}"></span>${yt}</div><div class="c"><span class="dot ${m.connected?"on":""}"></span>${mt}</div><div class="c"><span class="dot ${g.connected?"on":""}"></span>${gd}</div>`}
 $("#conn").addEventListener("click",async e=>{const b=e.target.closest("button[data-dc]");if(!b)return;await fetch("/api/disconnect/"+b.dataset.dc,{method:"POST"});load()});
 function draw(){
  $("nav.plat").innerHTML=Object.entries(P).map(([k,v])=>{const n=data.filter(c=>c.platforms[k].status==="pending_review").length;

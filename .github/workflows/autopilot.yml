@@ -50,6 +50,8 @@ jobs:
           R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
           META_TOKENS_JSON: ${{ secrets.META_TOKENS_JSON }}
           YOUTUBE_TOKENS_JSON: ${{ secrets.YOUTUBE_TOKENS_JSON }}
+          GDRIVE_TOKENS_JSON: ${{ secrets.GDRIVE_TOKENS_JSON }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           YOUTUBE_EVERY_HOURS: "4"
           ALLOW_BLURRED_NUDITY: "false"
           FONT_PATH: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf

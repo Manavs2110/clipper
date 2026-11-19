@@ -47,7 +47,8 @@ def _sync_state(cfg, direction: str) -> None:
 
 def _tokens_from_env() -> None:
     """In CI the OAuth tokens come from GitHub Secrets instead of the tokens/ folder."""
-    for env, name in (("META_TOKENS_JSON", "meta.json"), ("YOUTUBE_TOKENS_JSON", "youtube.json")):
+    for env, name in (("META_TOKENS_JSON", "meta.json"), ("YOUTUBE_TOKENS_JSON", "youtube.json"),
+                      ("GDRIVE_TOKENS_JSON", "gdrive.json")):
         if os.getenv(env) and not (publish.TOKENS / name).exists():
             publish._save(name, json.loads(os.environ[env]))
 
@@ -110,6 +111,12 @@ def main() -> int:
                 except Exception as e:
                     P[p].update(publish={"state": "failed", "error": str(e)[:500], "auto": True})
                     print(f"  ✗ {p}: {e}")
+            if posted_any and publish.connections()["gdrive"]["connected"]:
+                try:
+                    meta["drive"] = {"url": publish.save_to_drive(out, publish.drive_description(meta))}
+                    print(f"  ✓ saved to Google Drive: {meta['drive']['url']}")
+                except Exception as e:
+                    print(f"  ✗ Google Drive: {e}")
             out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
             db.record(c, "posted" if posted_any else "rendered", str(out))
             break

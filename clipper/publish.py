@@ -22,6 +22,8 @@ BASE_URL = "http://localhost:5050"
 META_REDIRECT = f"{BASE_URL}/auth/meta/callback"
 YT_REDIRECT = f"{BASE_URL}/auth/youtube/callback"
 YT_SECRET = ROOT / "youtube_client_secret.json"
+GD_REDIRECT = f"{BASE_URL}/auth/gdrive/callback"
+GD_SCOPES = ["https://www.googleapis.com/auth/drive"]  # needed to upload into a folder this app didn't create
 YT_SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly"]
 META_SCOPES = ["pages_show_list", "pages_read_engagement", "pages_manage_posts",
                "instagram_basic", "instagram_content_publish", "business_management"]
@@ -62,6 +64,8 @@ def connections() -> dict:
                  "page": meta and meta.get("page_name"), "instagram": meta and meta.get("ig_username"),
                  "r2": bool(_env("R2_PUBLIC_URL"))},
         "youtube": {"ready": YT_SECRET.exists(), "connected": bool(yt), "channel": yt and yt.get("channel")},
+        "gdrive": {"ready": YT_SECRET.exists() and bool(_env("GDRIVE_FOLDER_ID")), "connected": bool(_load("gdrive.json")),
+                   "account": (_load("gdrive.json") or {}).get("account"), "folder": (_load("gdrive.json") or {}).get("folder")},
     }
 
 
@@ -186,29 +190,37 @@ def post_instagram(video: Path, caption: str) -> str:
 
 
 # ------------------------------------------------------------------ YouTube
-def _yt_flow():
+def _yt_flow(scopes=None, redirect=None):
     from google_auth_oauthlib.flow import Flow
 
-    return Flow.from_client_secrets_file(str(YT_SECRET), scopes=YT_SCOPES, redirect_uri=YT_REDIRECT)
+    return Flow.from_client_secrets_file(str(YT_SECRET), scopes=scopes or YT_SCOPES, redirect_uri=redirect or YT_REDIRECT)
 
 
-def youtube_login_url() -> str:
-    flow = _yt_flow()
-    url, state = flow.authorization_url(access_type="offline", prompt="consent", include_granted_scopes="true")
-    _pending_state[state] = getattr(flow, "code_verifier", None) or "yt"
+def _google_login_url(scopes, redirect) -> str:
+    flow = _yt_flow(scopes, redirect)
+    url, state = flow.authorization_url(access_type="offline", prompt="consent")
+    _pending_state[state] = getattr(flow, "code_verifier", None) or "g"
     return url
 
 
-def youtube_callback(code: str, state: str) -> dict:
+def _google_callback(code: str, state: str, scopes, redirect):
     if state not in _pending_state:
         raise ValueError("Login expired or state mismatch. Click Connect again")
     verifier = _pending_state.pop(state)
     os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")  # localhost redirect is plain http
-    flow = _yt_flow()
-    if isinstance(verifier, str) and verifier != "yt":
+    flow = _yt_flow(scopes, redirect)
+    if isinstance(verifier, str) and verifier != "g":
         flow.code_verifier = verifier
     flow.fetch_token(code=code)
-    creds = flow.credentials
+    return flow.credentials
+
+
+def youtube_login_url() -> str:
+    return _google_login_url(YT_SCOPES, YT_REDIRECT)
+
+
+def youtube_callback(code: str, state: str) -> dict:
+    creds = _google_callback(code, state, YT_SCOPES, YT_REDIRECT)
     from googleapiclient.discovery import build
 
     ch = build("youtube", "v3", credentials=creds).channels().list(part="snippet", mine=True).execute()
@@ -242,3 +254,58 @@ def post_youtube(video: Path, title: str, description: str) -> str:
     while resp is None:
         _, resp = req.next_chunk()
     return f"https://youtube.com/shorts/{resp['id']}"
+
+
+# ------------------------------------------------------------------ Google Drive (archive copy)
+def gdrive_login_url() -> str:
+    return _google_login_url(GD_SCOPES, GD_REDIRECT)
+
+
+def _drive(creds=None):
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
+    if creds is None:
+        d = _load("gdrive.json")
+        if not d:
+            raise RuntimeError("Google Drive not connected")
+        creds = Credentials.from_authorized_user_info(d, GD_SCOPES)
+        if not creds.valid:
+            creds.refresh(Request())
+            _save("gdrive.json", {**json.loads(creds.to_json()), "account": d.get("account"), "folder": d.get("folder")})
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def gdrive_callback(code: str, state: str) -> dict:
+    creds = _google_callback(code, state, GD_SCOPES, GD_REDIRECT)
+    drv = _drive(creds)
+    account = drv.about().get(fields="user(emailAddress)").execute()["user"]["emailAddress"]
+    folder_id = _env("GDRIVE_FOLDER_ID")
+    try:
+        folder = drv.files().get(fileId=folder_id, fields="name,mimeType,capabilities(canAddChildren)",
+                                 supportsAllDrives=True).execute()
+    except Exception:
+        raise RuntimeError(f"{account} can't see the Drive folder. Log in with the account that owns it, "
+                           "or share the folder with this account as Editor")
+    if not folder.get("capabilities", {}).get("canAddChildren"):
+        raise RuntimeError(f"{account} can view the folder but can't add files. Give it Editor access")
+    data = {**json.loads(creds.to_json()), "account": account, "folder": folder["name"]}
+    _save("gdrive.json", data)
+    return data
+
+
+def save_to_drive(video: Path, description: str = "") -> str:
+    from googleapiclient.http import MediaFileUpload
+
+    drv = _drive()
+    body = {"name": video.name, "parents": [_env("GDRIVE_FOLDER_ID")], "description": description[:4000]}
+    f = drv.files().create(body=body, fields="id,webViewLink", supportsAllDrives=True,
+                           media_body=MediaFileUpload(str(video), mimetype="video/mp4", resumable=True)).execute()
+    return f["webViewLink"]
+
+
+def drive_description(meta: dict) -> str:
+    posts = [f"{p}: {v['publish']['url']}" for p, v in meta["platforms"].items()
+             if v.get("publish", {}).get("state") == "published"]
+    return "\n".join([meta["title"], f"Credit: {meta['credit']}", f"Source: {meta['source_url']}", *posts])
