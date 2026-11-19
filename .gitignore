@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+work/
+output/
+clipper.db
+youtube_client_secret.json
+tokens/
