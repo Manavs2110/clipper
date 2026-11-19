@@ -210,18 +210,8 @@ def auth_gdrive_cb():
     except Exception as e:
         traceback.print_exc()
         return _done(f"Couldn't connect Google Drive: {e}"), 400
-    threading.Thread(target=_backfill_drive, daemon=True).start()
     return _done(f"Connected ✓ Google Drive <b>{d['account']}</b> → folder <b>{d['folder']}</b>. "
-                 "Already-posted clips are being copied there now.")
-
-
-def _backfill_drive() -> None:
-    for j in cfg().review_dir.glob("*.json"):
-        m = json.loads(j.read_text())
-        posted = any(v.get("publish", {}).get("state") == "published" and v.get("verdict") != "block"
-                     for v in m.get("platforms", {}).values())
-        if posted:
-            _archive(j.stem)
+                 "New posts will be saved there.")
 
 
 @app.post("/api/disconnect/<svc>")
