@@ -68,6 +68,11 @@ def main() -> int:
         _sync_state(cfg, "down")
     db = DB(cfg.db_path)
     get, put = _kv(db)
+    post_every = float(os.getenv("POST_EVERY_HOURS", "2")) * 3600
+    since = time.time() - float(get("last_post") or 0)
+    if since < post_every - 600 and not a.dry_run:  # GitHub cron is unreliable, so it fires often and we gate here
+        print(f"Last post {since / 3600:.1f}h ago; next one after {post_every / 3600:.0f}h. Nothing to do.")
+        return 0
     yt_every = float(os.getenv("YOUTUBE_EVERY_HOURS", "4")) * 3600
     yt_due = publish.connections()["youtube"]["connected"] and time.time() - float(get("last_youtube") or 0) >= yt_every
     conn = publish.connections()
@@ -75,6 +80,7 @@ def main() -> int:
     print(f"targets: instagram={meta_ok and bool(conn['meta']['instagram'])} facebook={meta_ok} youtube={yt_due}")
 
     posted_any = False
+    failures = []
     try:
         for c in candidates(cfg, db, a.hours, a.min_views, a.lang)[:MAX_TRIES]:
             out = process_clip(c, cfg, db)
@@ -111,6 +117,7 @@ def main() -> int:
                 except Exception as e:
                     P[p].update(publish={"state": "failed", "error": str(e)[:500], "auto": True})
                     print(f"  ✗ {p}: {e}")
+                    failures.append(p)
             if posted_any and publish.connections()["gdrive"]["connected"]:
                 try:
                     meta["drive"] = {"url": publish.save_to_drive(out, publish.drive_description(meta))}
@@ -119,12 +126,17 @@ def main() -> int:
                     print(f"  ✗ Google Drive: {e}")
             out.with_suffix(".json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
             db.record(c, "posted" if posted_any else "rendered", str(out))
+            if posted_any and not a.dry_run:
+                put("last_post", time.time())
             break
         else:
             print("No clean clip found this run. Will try again next run.")
     finally:
         if not a.local_state and not a.dry_run:
             _sync_state(cfg, "up")
+    if failures:
+        print(f"::error::Posting failed on: {', '.join(failures)}. Reconnect in the review page and update the GitHub secret")
+        return 1  # red run in GitHub + email notification
     return 0
 
 
